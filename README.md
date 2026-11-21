@@ -3,7 +3,7 @@
 Réimplémentation du jeu **Flappy Bird** sur une carte **EasyPIC v7** (microcontrôleur PIC18F4550), avec une interface graphique en **Python**.
 Projet d'équipe réalisé en 4e année du cycle ingénieur (ING4, Systèmes Embarqués) à l'**ECE Paris**, 2025-2026.
 
-![Partie en cours](images/jeu.png)
+![Partie en cours](jeu.png)
 
 ## Le projet
 
@@ -27,14 +27,14 @@ L'objectif était aussi de **comparer plusieurs capteurs** pour contrôler l'ois
 - Mode **Replay** : rejoue en accéléré la dernière partie
 
 <p align="center">
-  <img src="images/menu.png" alt="Menu du jeu" width="450">
+  <img src="menu.png" alt="Menu du jeu" width="450">
 </p>
 
 ## Schéma électronique
 
 Schéma réalisé sous **KiCad** : PIC18F4550, bouton poussoir sur RB0 (pull-up interne) et liaison USB via le connecteur de la carte EasyPIC v7.
 
-![Schéma KiCad](images/schema.png)
+![Schéma KiCad](schema.png)
 
 ## Technologies
 
