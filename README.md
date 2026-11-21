@@ -3,7 +3,9 @@
 Réimplémentation du jeu **Flappy Bird** sur une carte **EasyPIC v7** (microcontrôleur PIC18F4550), avec une interface graphique en **Python**.
 Projet d'équipe réalisé en 4e année du cycle ingénieur (ING4, Systèmes Embarqués) à l'**ECE Paris**, 2025-2026.
 
-![Partie en cours](jeu.png)
+<p align="center">
+  <img src="jeu.png" alt="Le jeu" width="450">
+</p>
 
 ## Le projet
 
