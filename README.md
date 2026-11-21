@@ -30,13 +30,15 @@ L'objectif était aussi de **comparer plusieurs capteurs** pour contrôler l'ois
 - Carte **EasyPIC v7**, microcontrôleur PIC18
 - Interruptions, timers, entrées/sorties numériques, liaison USB
 - Interface graphique en **Python** (Tkinter)
-- Schéma électronique réalisé sous **KiCad**
 
 ## Ma contribution
 
-- À compléter
-- À compléter
+- **Interface graphique Python** : moteur de jeu (gravité, génération aléatoire des tuyaux), animation des nuages en arrière-plan et rendu graphique de l'oiseau
+- **Communication USB CDC** : mise en place de la liaison entre le PIC18F4550 et le PC, la carte étant vue comme un port série virtuel
+- **Menu de la carte** : écran « Press Start », choix des modes de jeu et du mode Replay
+- **Modes de jeu bouton poussoir et capteur infrarouge** : acquisition des entrées en C et en assembleur inline, puis envoi des commandes au jeu
+- **Mode Replay** : enregistrement des commandes de la dernière partie et relecture accélérée dans l'interface
 
 ## Équipe
 
-Projet réalisé en équipe de [nombre] étudiants.
+Projet réalisé en équipe de 4 étudiants.
