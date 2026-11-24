@@ -1,0 +1,68 @@
+#include "sysconfig.h" // Doit contenir les pragmas du Tableau 1
+#include "usb.h"
+#include "usb_device.h"     // Requis pour la pile USB 
+#include "usb_device_cdc.h" // Requis pour CDC 
+#include "usb_cdc_lib.h"    // Requis pour putUSBUSART 
+#include <xc.h>
+
+// --- Prototypes de fonctions ---
+void InitializeSystem(void);
+void CheckButtonInput(char *button_pressed);
+
+void InitializeSystem(void) {
+    __asm(
+        // ADCON1 = 0x0F; (DÉFINIR RB0/AN12 EN NUMÉRIQUE)
+        "MOVLW 0x0F\n"      
+        "MOVWF ADCON1\n"
+        // TRISBbits.TRISB0 = 1; (RB0 est une entrée)
+        "BSF TRISB, 0\n"    
+        // LATB = 0x00; (Effacer le registre de sortie PORTB)
+        "CLRF LATB\n"       
+        // INTCONbits.GIE = 1; (Activer interruptions globales)
+        "BSF INTCON, 7\n"   
+        // INTCONbits.PEIE = 1; (Activer interruptions périphériques)
+        "BSF INTCON, 6\n"   
+    );
+}
+
+void CheckButtonInput(char *button_pressed) {
+    // CORRECTION 1: Initialiser pour éviter l'avertissement (1257)
+    char button_state = 0;
+    
+    // CORRECTION 2: Syntaxe ASM multiligne correcte pour XC8
+    // Toutes les instructions sont dans un seul bloc asm() avec des '\n'
+    __asm(
+        "MOVF PORTB, W\n"       // Lire PORTB dans le registre W
+        "ANDLW 0x01\n"          // Isoler le bit 0 (RB0)
+    );
+    button_state = WREG; // button_state vaut 0 si pressé (en supposant un pull-up)
+
+    if (button_state == 0 && *button_pressed == 0) {
+        // --- Logique équivalente à un front montant ---
+        *button_pressed = 1; // Définir le drapeau
+        
+        // Envoyer les données
+        // CORRECTION 3: Caster en (uint8_t*) pour éviter l'avertissement
+        putUSBUSART((uint8_t*)"FLAP\n", 5); // 
+    
+    } else if (button_state!= 0) {
+        // Le bouton est relâché, effacer le drapeau
+        *button_pressed = 0; 
+    }
+}
+
+void main(void) {
+    initUSBLib();
+    InitializeSystem();
+    // Machine à états pour l'anti-rebond (drapeau)
+    char button_pressed = 0; 
+    // --- Boucle d'exécution principale ---
+    while(1) { 
+        USBDeviceTasks(); 
+        
+        if (isUSBReady()) { 
+            CheckButtonInput(&button_pressed);
+            CDCTxService();
+        }
+    }
+}

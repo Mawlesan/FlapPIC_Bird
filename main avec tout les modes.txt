@@ -1,0 +1,358 @@
+#include "sysconfig.h"
+#include "usb.h"
+#include "usb_device.h"
+#include "usb_device_cdc.h"
+#include "usb_cdc_lib.h"
+#include <xc.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+#define _XTAL_FREQ 48000000UL  // Fréquence système
+#define FLAP_THRESHOLD 7000    // Seuil max Ultrason
+#define SENSOR_DEADZONE 50     // Seuil mini Ultrason
+#define IR_DEBUG 1 // DEBUG IR, 1 = affiche I1=... périodiquement; 0 = silencieux
+
+// --- USB BUFFERS ---
+static uint8_t usbReadBuffer[64];
+static uint8_t usbWriteBuffer[64];
+
+// Variable globale
+volatile unsigned int timeout;      // Ultrason
+volatile unsigned int duration;     // Ultrason
+volatile uint8_t current_state = 0; // Encodeur Digitale
+volatile uint8_t last_state = 0;    // Encodeur Digitale
+volatile uint8_t encoder_value = 0; // Encodeur Digitale
+volatile uint8_t last_value = 0;    // Encodeur Digitale
+volatile uint8_t g_s = 0;           // ASM
+
+void InitializeSystem(void) {
+    USBDeviceInit();      // Initialise USB
+    USBDeviceAttach();    // Attache périphérique USB
+
+    __asm(
+        // Configuration Bouton
+        "MOVLW 0x0F\n"    // ADCON1 = 0x0F; (DÉFINIR RB0/AN12 EN NUMÉRIQUE)
+        "MOVWF ADCON1\n"
+        "BSF TRISB, 0\n"  //TRISBbits.TRISB0 = 1; // RB0 entrée
+        "CLRF LATB\n" 
+            
+        // Configuration Ultrason
+        "BCF TRISC, 0\n"  //TRISCbits.TRISC0 = 0; // TRIG sortie
+        "BSF TRISC, 1\n"  //TRISCbits.TRISC1 = 1; // ECHO entrée
+        // Configuration Timer1
+        "BCF T1CON, 1\n"  // TMR1CS = 0 
+        "BCF T1CON, 5\n"  // T1CKPS0 = 0
+        "BCF T1CON, 4\n"  // T1CKPS1 = 0 : Prédiviseur 1:1
+        "BCF T1CON, 3\n"  // T1OSCEN = 0 : Oscillateur Timer1 désactivé
+        "BCF T1CON, 0\n"  // TMR1ON = 0 : Timer1 OFF
+            
+        // Configuration Encodeur
+        "BSF TRISD, 0\n"  //TRISDbits.TRISD0 = 1; // RD0 entrée
+        "BSF TRISD, 1\n"  //TRISDbits.TRISD1 = 1; // RD1 entrée
+        "CLRF LATD\n" 
+    );
+}
+
+uint16_t MeasureEcho(void) {
+    timeout = 30000;
+
+    // --- Envoi impulsion TRIG (10 µs) ---
+    __asm(
+        "BSF LATC, 0\n"      // TRIG = 1
+        "NOP\nNOP\nNOP\nNOP\nNOP\nNOP\nNOP\nNOP\nNOP\nNOP\n" // Délai 10µs
+        "BCF LATC, 0\n"      // TRIG = 0
+            
+        // Attente front montant sur ECHO 
+        "CLRF _timeout+1\n"       
+        "MOVLW 0x30\n"           
+        "MOVWF _timeout\n"
+
+        "WAIT_RISE:\n"
+        "BTFSS PORTC, 1\n"        // Test RC1 (ECHO) = 1 ?
+        "GOTO DEC_TIMEOUT_RISE\n" // Sinon, décrémente timeout
+        "GOTO RISE_DONE\n"        // Oui, sortie
+
+        "DEC_TIMEOUT_RISE:\n"
+        "DECFSZ _timeout, F\n"    
+        "GOTO WAIT_RISE\n"
+        "DECFSZ _timeout+1, F\n"
+        "GOTO WAIT_RISE\n"
+
+        "RISE_DONE:\n"
+    );
+    
+    if(timeout==0) return 0;  
+
+    // --- Démarrage Timer1 (en assembleur) ---
+    __asm(
+        "CLRF TMR1H\n"      // TMR1H = 0
+        "CLRF TMR1L\n"      // TMR1L = 0
+        "BSF  T1CON, 0\n"   // TMR1ON = 1 
+    );
+    
+    timeout = 60000;
+    
+    // --- Attente front descendant ---
+    __asm(
+        "CLRF _timeout+1\n"     
+        "MOVLW 0x60\n"          
+        "MOVWF _timeout\n"
+
+        "WAIT_FALL:\n"
+        "BTFSC PORTC, 1\n"            // Test RC1 = 0 ?
+            "GOTO DEC_TIMEOUT_FALL\n" // Non, décrémente timeout
+        "GOTO FALL_DONE\n"            // Oui, sortie
+
+        "DEC_TIMEOUT_FALL:\n"
+        "DECFSZ _timeout, F\n"
+        "GOTO WAIT_FALL\n"
+        "DECFSZ _timeout+1, F\n"
+        "GOTO WAIT_FALL\n"
+
+        "FALL_DONE:\n"
+
+    // Lecture du résultat 
+        "BCF T1CON, 0\n"             // arrêt Timer1
+        "MOVFF TMR1H, _duration+1\n" // MSB
+        "MOVFF TMR1L, _duration\n"   // LSB
+    );
+    return duration;
+}
+
+void MesureEncoder(void) {
+    __asm(
+        // --- Lire PORTD et isoler RD0-RD1 ---
+        "MOVF PORTD, W\n"
+        "ANDLW 0x03\n"
+        "MOVWF _current_state\n"
+
+        // --- Comparer avec last_state ---
+        "MOVF _current_state, W\n"
+        "XORWF _last_state, W\n"
+        "BZ DONE_ENCODER\n"           // pas de changement : fin
+
+        // --- Détection CW ---
+        "MOVF _current_state, W\n"
+        "SUBWF _last_state, W\n"
+        "BTFSC STATUS, 2\n"           // Z = 0 ?
+        "GOTO ROTATE_CW\n"
+
+        // --- Détection CCW ---
+        "MOVF _encoder_value, W\n"
+        "DECFSZ _encoder_value, F\n"  // décrémente si ≠ 0
+        "GOTO DONE_ENCODER\n"          // sinon fin
+        "MOVLW 0xFF\n"                 // si 0, passe à 255
+        "MOVWF _encoder_value\n"
+        "GOTO DONE_ENCODER\n"
+
+        "ROTATE_CW:\n"
+        "INCF _encoder_value, F\n"     // incrémente, overflow auto
+
+        "DONE_ENCODER:\n"
+    );
+    last_state = current_state;
+}
+
+void CheckButton(char *button_pressed) {
+    char button_state = 0;
+
+    __asm(
+        "MOVF PORTB, W\n"       // Lire PORTB dans le registre W
+        "ANDLW 0x01\n"          // Isoler le bit 0 (RB0)
+    );
+    button_state = WREG; // button_state vaut 0 si pressé 
+
+    if (button_state == 0 && *button_pressed == 0) {
+        *button_pressed = 1; // Définir le drapeau
+        
+        putUSBUSART((uint8_t*)"FLAP\n", 5); // Envoyer les données 
+    } 
+    else if (button_state!= 0) {
+        *button_pressed = 0; // Le bouton est relâché, effacer le drapeau
+    }
+}
+
+void CheckSound(void) {
+    uint16_t distance = MeasureEcho();  // Mesure capteur HC-SR04
+
+    // Si distance dans plage, on déclenche le flap
+    if (distance > SENSOR_DEADZONE && distance < FLAP_THRESHOLD)
+    {
+        putUSBUSART((uint8_t*)"FLAP\n", 5);
+    }
+    /*
+    // Debug
+    char buf[32];
+    sprintf(buf, "DIST=%u\r\n", distance);
+    putUSBUSART((uint8_t*)buf, strlen(buf));
+    */
+}
+
+void CheckEncoder(void) {
+    char button_state = PORTB & 0x01;  // lire RB0 directement
+    
+    if(button_state == 1) return; // Bouton pressé = stop
+    
+    MesureEncoder();  // Met à jour encoder_value
+
+    if (encoder_value != last_value) {
+        putUSBUSART((uint8_t*)"FLAP\n", 5);
+        last_value = encoder_value; // Mettre à jour la dernière valeur connue
+    }
+    /*
+    // Debug
+    char buf[32];
+    sprintf(buf, "ENC=%d\r\n", encoder_value);
+    putUSBUSART((uint8_t*)buf, strlen(buf));
+    */
+}
+
+// ---------- OUTILS SERIAL SANS sprintf ----------
+static void put_str(const char* s){
+    if(!mUSBUSARTIsTxTrfReady()) return;
+    putUSBUSART((uint8_t*)s, (uint8_t)strlen(s));
+}
+static void put_u16(const char* prefix, uint16_t v){
+    char buf[20]; uint8_t i=0, j, k;
+    while(prefix && *prefix && i<sizeof(buf)-1) buf[i++]=*prefix++;
+    char tmp[6]; j=0; if(v==0){ tmp[j++]='0'; } else { while(v && j<sizeof(tmp)){ tmp[j++]=(char)('0'+(v%10)); v/=10; } }
+    for(k=0;k<j && i<sizeof(buf)-1;k++) buf[i++]=tmp[j-1-k];
+    if(i<sizeof(buf)-1) buf[i++]='\n'; buf[i]=0; put_str(buf);
+}
+
+// -------------------- IO / ADC SETUP --------------------
+// AN1 = RA1 (ton canal “vivant”)
+static void initIO(void){
+    // Couper comparateurs & Vref interne pour libérer RA1
+    CMCON = 0x07;             // comparateurs OFF
+    CVRCONbits.CVREN = 0;     // Vref OFF
+
+    TRISAbits.TRISA1 = 1;     // AN1 entrée
+    // ADCON1: AN1 analogique, le reste numérique (PCFG=0b1101 => 0x0D)
+    ADCON1 = 0x0D;
+
+    // ADC stable @48MHz
+    ADCON2bits.ADFM = 1;      // résultat à droite
+    ADCON2bits.ACQT = 0b101;  // 12 TAD
+    ADCON2bits.ADCS = 0b110;  // Fosc/64
+    ADCON0bits.ADON = 1;      // ADC ON
+
+    // Bouton RB0 (inchangé)
+    TRISBbits.TRISB0 = 1;
+    INTCON2bits.RBPU = 0;     // pull-ups activables (selon cavaliers)
+}
+
+// -------------------- ADC HELPERS --------------------
+// Lit AN1 uniquement
+static uint16_t readAN1_raw(void){
+    ADCON0bits.CHS = 0b0001;  // AN1
+    __delay_us(10);           // temps d’acquisition
+    ADCON0bits.GO = 1;
+    while(ADCON0bits.GO);     // fin conversion
+    return (((uint16_t)ADRESH << 8) | ADRESL);
+}
+static uint16_t readAN1_avg(uint8_t n){
+    uint32_t acc=0; for(uint8_t i=0;i<n;i++) acc += readAN1_raw();
+    return (uint16_t)(acc / n);
+}
+
+// -------------------- IR : CALIBRATION & DÉTECTION --------------------
+typedef struct {
+    uint16_t ambient;   // niveau moyen “sans main”
+    // Seuils pour actif-HAUT (v monte) :
+    uint16_t th_hi_high, th_hi_low;
+    // Seuils pour actif-BAS (v descend) :
+    uint16_t th_lo_high, th_lo_low;
+    uint8_t  state;     // 0 = pas de main, 1 = main
+    uint8_t  prev;      // pour détection du front montant
+} IRChan;
+
+static void ir_calibrate(IRChan* c){
+    uint16_t amb = readAN1_avg(32);
+    if(amb < 5) amb = 5;
+    if(amb > 1000) amb = 1000;
+
+    // Deltas (à ajuster si besoin) :
+    //   côté “actif-haut”  : déclenche au-dessus de ambient + 25, relâche à +15
+    //   côté “actif-bas”   : déclenche en-dessous de ambient - 15, relâche à -8
+    const uint16_t d_hi_high = 25, d_hi_low = 15;
+    const uint16_t d_lo_high = 15, d_lo_low = 8;
+
+    c->ambient    = amb;
+    c->th_hi_high = (amb + d_hi_high > 1023) ? 1023 : (amb + d_hi_high);
+    c->th_hi_low  = (amb + d_hi_low  > 1023) ? 1023 : (amb + d_hi_low);
+
+    // pour les seuils bas, protège sous 0
+    c->th_lo_high = (amb > d_lo_high) ? (amb - d_lo_high) : 0;
+    c->th_lo_low  = (amb > d_lo_low ) ? (amb - d_lo_low ) : 0;
+
+    c->state = 0;
+    c->prev  = 0;
+}
+
+static uint8_t ir_update(IRChan* c){
+    uint16_t v = readAN1_avg(8);
+
+    // Hystérésis bipolaire :
+    // - Si pas de main (state=0) : entre en détection si v >= th_hi_high (actif-haut)
+    //                              OU si v <= th_lo_high (actif-bas)
+    // - Si main (state=1)        : quitte si v <= th_hi_low  (retombe côté haut)
+    //                              OU si v >= th_lo_low  (remonte côté bas)
+    if(!c->state){
+        if( (v >= c->th_hi_high) || (v <= c->th_lo_high) ) c->state = 1;
+    } else {
+        if( (v <= c->th_hi_low)  && (v >= c->th_lo_low) )  c->state = 0;
+    }
+
+    // Front montant (0->1) -> FLAP
+    uint8_t rising = (c->state==1) && (c->prev==0);
+    c->prev = c->state;
+
+#if IR_DEBUG
+    static uint16_t dbg=0;
+    if(++dbg >= 80){ dbg=0; put_u16("I1=", v); }
+#endif
+
+    // Recalage lent de l’ambiance quand pas de main
+    static uint8_t iir_div=0;
+    if(c->state==0 && (++iir_div & 0x0F)==0){
+        c->ambient = (uint16_t)((15u*c->ambient + v)/16u);
+        // recalcule les seuils autour de la nouvelle ambiance
+        const uint16_t d_hi_high = 25, d_hi_low = 15;
+        const uint16_t d_lo_high = 15, d_lo_low = 8;
+        c->th_hi_high = (c->ambient + d_hi_high > 1023) ? 1023 : (c->ambient + d_hi_high);
+        c->th_hi_low  = (c->ambient + d_hi_low  > 1023) ? 1023 : (c->ambient + d_hi_low);
+        c->th_lo_high = (c->ambient > d_lo_high) ? (c->ambient - d_lo_high) : 0;
+        c->th_lo_low  = (c->ambient > d_lo_low ) ? (c->ambient - d_lo_low ) : 0;
+    }
+
+    return rising;
+}
+
+
+void main(void) {  
+    initUSBLib();
+    InitializeSystem();
+    char button_pressed = 0;
+    IRChan ir1; ir_calibrate(&ir1); // IR AN1 : calibration
+    
+    while (1)
+    {
+            USBDeviceTasks();
+            if (USBGetDeviceState() < CONFIGURED_STATE || USBIsDeviceSuspended())
+                continue;
+            CheckButton(&button_pressed);
+            CheckSound();
+            CheckEncoder();
+            
+            (void)getsUSBUSART(usbReadBuffer, sizeof(usbReadBuffer));
+            // IR (AN1) : front montant -> FLAP 
+            if(ir_update(&ir1)){
+                putUSBUSART((uint8_t*)"FLAP\n", 5);
+            }
+
+            CDCTxService();
+            __delay_ms(50);
+    }
+}
